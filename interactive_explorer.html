@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>VTOL Drone Sizing Interactive Explorer</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <style>
+        body { font-family: -apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; padding: 20px; background-color: #f5f7fa; color: #333; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .controls { display: flex; gap: 20px; margin-bottom: 20px; align-items: flex-end; flex-wrap: wrap; }
+        .control-group { display: flex; flex-direction: column; flex-grow: 1; }
+        select { padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; background-color: #fff; }
+        label { font-weight: bold; margin-bottom: 5px; font-size: 14px; color: #555; }
+        #plot { width: 100%; height: 700px; border: 1px solid #eee; border-radius: 4px; }
+        h1 { margin-top: 0; color: #2c3e50; }
+        #loading { color: #e67e22; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>VTOL Conceptual Sizing Interactive Explorer</h1>
+        <p>This dashboard loads the <code>vtol_comprehensive_sweep.csv</code> file dynamically and allows you to select Inputs for the X-axis and Calculated Outputs for the Y-axis.</p>
+        
+        <div id="loading">Loading CSV data...</div>
+
+        <div class="controls" style="display:none;" id="controls">
+            <div class="control-group">
+                <label for="xAxis">X-Axis (Inputs)</label>
+                <select id="xAxis"></select>
+            </div>
+            <div class="control-group">
+                <label for="yAxis">Y-Axis (Outputs)</label>
+                <select id="yAxis"></select>
+            </div>
+            <div class="control-group">
+                <label for="colorAxis">Color Grouping (Optional)</label>
+                <select id="colorAxis">
+                    <option value="none">-- None --</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="plot"></div>
+    </div>
+
+    <script>
+        let globalData = [];
+        let headers = [];
+
+        // Fetch and parse the CSV
+        fetch('vtol_comprehensive_sweep.csv')
+            .then(response => {
+                if (!response.ok) throw new Error("Could not find the CSV file. Please make sure the python script successfully generated 'vtol_comprehensive_sweep.csv' in the same directory.");
+                return response.text();
+            })
+            .then(csvText => {
+                Papa.parse(csvText, {
+                    header: true,
+                    dynamicTyping: true,
+                    skipEmptyLines: true,
+                    complete: function(results) {
+                        globalData = results.data;
+                        headers = results.meta.fields;
+                        initializeDashboard();
+                    }
+                });
+            })
+            .catch(error => {
+                document.getElementById('loading').innerHTML = `<span style="color:red">Error: ${error.message}</span>`;
+            });
+
+        function initializeDashboard() {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('controls').style.display = 'flex';
+
+            const xSelect = document.getElementById('xAxis');
+            const ySelect = document.getElementById('yAxis');
+            const cSelect = document.getElementById('colorAxis');
+
+            // Segregate inputs and outputs roughly by name pattern or prefix
+            // Based on Python dataclasses, assumption fields don't have 'OUT_', result fields have 'OUT_'
+            let inputs = [];
+            let outputs = [];
+
+            headers.forEach(h => {
+                let niceName = h.replace('OUT_', '').replace(/_/g, ' ').toUpperCase();
+                let optionHTML = `<option value="${h}">${niceName} (${h})</option>`;
+                
+                if (h.startsWith('OUT_')) {
+                    outputs.push({html: optionHTML, raw: h});
+                } else {
+                    inputs.push({html: optionHTML, raw: h});
+                }
+            });
+
+            // Populate Dropdowns
+            xSelect.innerHTML = inputs.map(i => i.html).join('');
+            ySelect.innerHTML = outputs.map(i => i.html).join('');
+            
+            // Allow coloring by inputs
+            cSelect.innerHTML += inputs.map(i => i.html).join('');
+
+            // Select some smart defaults
+            if (inputs.find(i => i.raw === 'cruise_speed_mps')) xSelect.value = 'cruise_speed_mps';
+            if (outputs.find(o => o.raw === 'OUT_total_mission_energy_Wh')) ySelect.value = 'OUT_total_mission_energy_Wh';
+            if (inputs.find(i => i.raw === 'aspect_ratio')) cSelect.value = 'aspect_ratio';
+
+            // Add Event Listeners
+            xSelect.addEventListener('change', updatePlot);
+            ySelect.addEventListener('change', updatePlot);
+            cSelect.addEventListener('change', updatePlot);
+
+            updatePlot();
+        }
+
+        function updatePlot() {
+            const xField = document.getElementById('xAxis').value;
+            const yField = document.getElementById('yAxis').value;
+            const cField = document.getElementById('colorAxis').value;
+
+            if (!xField || !yField) return;
+
+            let traces = [];
+
+            if (cField === 'none') {
+                let xData = globalData.map(row => row[xField]);
+                let yData = globalData.map(row => row[yField]);
+                
+                traces.push({
+                    x: xData,
+                    y: yData,
+                    mode: 'markers',
+                    type: 'scatter',
+                    marker: { size: 10, opacity: 0.7, color: '#3498db' }
+                });
+            } else {
+                // Group by color field
+                let groups = {};
+                globalData.forEach(row => {
+                    let val = row[cField];
+                    if (!groups[val]) groups[val] = {x: [], y: []};
+                    groups[val].x.push(row[xField]);
+                    groups[val].y.push(row[yField]);
+                });
+
+                for (const [key, data] of Object.entries(groups)) {
+                    traces.push({
+                        x: data.x,
+                        y: data.y,
+                        mode: 'markers+lines',
+                        type: 'scatter',
+                        name: `${cField.replace(/_/g, ' ')}: ${key}`,
+                        marker: { size: 8, opacity: 0.8 }
+                    });
+                }
+            }
+
+            const layout = {
+                title: `${yField.replace('OUT_', '').replace(/_/g, ' ').toUpperCase()} vs ${xField.replace(/_/g, ' ').toUpperCase()}`,
+                xaxis: { title: xField, automargin: true },
+                yaxis: { title: yField.replace('OUT_', ''), automargin: true },
+                hovermode: 'closest',
+                plot_bgcolor: '#fff',
+                paper_bgcolor: '#fff'
+            };
+
+            Plotly.newPlot('plot', traces, layout);
+        }
+    </script>
+</body>
+</html>
